@@ -3,24 +3,27 @@ import os
 import pygame
 import requests
 
-# 桌面 client 在本機執行，透過這個網址呼叫雲端 FastAPI server。
-#API_BASE_URL = "https://wordle-server-a076.onrender.com"
-API_BASE_URL = "http://127.0.0.1:8000"
+# 部署至 Render 請替換此網址
+API_BASE_URL = "https://two0261109.onrender.com"
+# API_BASE_URL = "http://127.0.0.1:8000"
 
-# 顏色定義
 COLOR_BG = (18, 18, 19)
 COLOR_TEXT = (255, 255, 255)
 COLOR_EMPTY = (58, 58, 60)
 COLOR_CORRECT = (83, 141, 78)   # 綠色
 COLOR_PRESENT = (181, 159, 59)  # 黃色
 COLOR_ABSENT = (58, 58, 60)     # 灰色
+COLOR_PANEL_BG = (30, 30, 32)
+COLOR_LINE = (80, 80, 80)
 
 pygame.init()
-WIDTH, HEIGHT = 500, 650
+# 任務三：寬度擴展至 700
+WIDTH, HEIGHT = 700, 650
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Pygame Wordle + FastAPI Client")
 font = pygame.font.SysFont("Arial", 36, bold=True)
 small_font = pygame.font.SysFont("Arial", 18)
+panel_font = pygame.font.SysFont("Arial", 20, bold=True)
 
 class WordleGame:
     def __init__(self):
@@ -30,29 +33,36 @@ class WordleGame:
         self.row = 0
         self.col = 0
         self.game_over = False
-        self.message = "Press ENTER to submit, R to restart"
+        self.hard_mode = False  # 任務四：預設 Normal Mode
+        self.history_words = [] # 任務三：歷史單字列表
+        self.stats = {"total_games": 0, "wins": 0, "win_rate": 0}
+        self.message = "Press ENTER to submit, R to restart, H to toggle Hard Mode"
         self.start_new_game()
 
     def start_new_game(self):
-        """ 向 FastAPI 伺服器請求建立新的一局 """
+        """ 向 FastAPI 請求開局 """
         try:
-            # Render 免費服務休眠後，第一次請求可能需要較久才會喚醒。
-            res = requests.post(f"{API_BASE_URL}/api/new-game", timeout=60)
+            payload = {"hard_mode": self.hard_mode}
+            res = requests.post(f"{API_BASE_URL}/api/new-game", json=payload, timeout=60)
             if res.status_code == 200:
-                self.game_id = res.json()["game_id"]
+                data = res.json()
+                self.game_id = data["game_id"]
                 self.grid = [["" for _ in range(5)] for _ in range(6)]
                 self.colors = [[COLOR_EMPTY for _ in range(5)] for _ in range(6)]
                 self.row = 0
                 self.col = 0
                 self.game_over = False
-                self.message = "New game started!"
+                self.history_words = []
+                if "stats" in data:
+                    self.stats = data["stats"]
+                self.message = "New game started! (6 tries left)"
             else:
                 self.message = "Server error starting new game."
         except requests.exceptions.RequestException:
             self.message = "Cannot connect to FastAPI server!"
 
     def submit_guess(self):
-        """ 將當前行單字發送至 FastAPI 驗證 """
+        """ 發送猜測 """
         if self.col < 5:
             self.message = "Not enough letters!"
             return
@@ -66,7 +76,7 @@ class WordleGame:
                 data = res.json()
                 feedback = data["feedback"]
                 
-                # 依據後端回傳更新格子顏色
+                # 更新格子顏色
                 for i in range(5):
                     if feedback[i] == "correct":
                         self.colors[self.row][i] = COLOR_CORRECT
@@ -75,24 +85,49 @@ class WordleGame:
                     else:
                         self.colors[self.row][i] = COLOR_ABSENT
 
+                # 任務三：記錄歷史單字
+                self.history_words.append(guess_word)
+                if "stats" in data:
+                    self.stats = data["stats"]
+
+                # 任務一：勝利 / 失敗邏輯處理
                 if data["is_correct"]:
                     self.message = "Congratulations! You won! Press R to restart."
                     self.game_over = True
                 else:
                     self.row += 1
                     self.col = 0
-                    if self.row == 6:
-                        self.message = "Game Over! Press R to restart."
+                    tries_left = data.get("attempts_left", 6 - self.row)
+                    
+                    if self.row == 6 or tries_left == 0:
+                        target = data.get("target_word", "UNKNOWN")
+                        # 任務一：顯示 Game Over! The word was XXX
+                        self.message = f"Game Over! The word was {target}. Press R to restart."
                         self.game_over = True
                     else:
-                        self.message = "Keep guessing!"
+                        # 任務一：顯示 (X tries left)
+                        self.message = f"Keep guessing! ({tries_left} tries left)"
             else:
-                self.message = res.json().get("detail", "Error processing guess")
+                # 任務二：字典庫驗證失敗，不扣減次數 (self.row 不加 1)，提示 "Not in word list!"
+                err_detail = res.json().get("detail", "")
+                if "dictionary" in err_detail or res.status_code == 400:
+                    if "Hard Mode" in err_detail:
+                        self.message = "Hard Mode: Must use revealed hint at green position"
+                    else:
+                        self.message = "Not in word list!"
+                else:
+                    self.message = err_detail
         except requests.exceptions.RequestException:
             self.message = "Network error during guess!"
 
     def handle_keydown(self, event):
         if event.key == pygame.K_r:
+            self.start_new_game()
+            return
+
+        # 任務四：按下 H 切換模式
+        if event.key == pygame.K_h:
+            self.hard_mode = not self.hard_mode
             self.start_new_game()
             return
 
@@ -112,8 +147,9 @@ class WordleGame:
 
     def draw(self, surface):
         surface.fill(COLOR_BG)
-        # 繪製 6x5 網格
-        margin_x, margin_y = 75, 50
+        
+        # 1. 繪製 6x5 主遊戲網格 (x: 0 ~ 500)
+        margin_x, margin_y = 50, 50
         box_size = 60
         gap = 10
 
@@ -123,21 +159,57 @@ class WordleGame:
                 y = margin_y + r * (box_size + gap)
                 rect = pygame.Rect(x, y, box_size, box_size)
                 
-                # 畫背景框
                 pygame.draw.rect(surface, self.colors[r][c], rect, border_radius=4)
                 if self.colors[r][c] == COLOR_EMPTY:
-                    pygame.draw.rect(surface, (80, 80, 80), rect, width=2, border_radius=4)
+                    pygame.draw.rect(surface, COLOR_LINE, rect, width=2, border_radius=4)
 
-                # 畫字母
                 char = self.grid[r][c]
                 if char:
                     text_surface = font.render(char, True, COLOR_TEXT)
                     text_rect = text_surface.get_rect(center=rect.center)
                     surface.blit(text_surface, text_rect)
 
-        # 畫底部提示訊息
+        # 2. 任務三：右側邊欄 (x: 500 ~ 700) 分隔線與儀表板
+        pygame.draw.line(surface, COLOR_LINE, (500, 0), (500, HEIGHT), 2)
+        panel_rect = pygame.Rect(500, 0, 200, HEIGHT)
+        pygame.draw.rect(surface, COLOR_PANEL_BG, panel_rect)
+
+        # 任務四：右上角顯示模式狀態
+        mode_text = "Mode: HARD" if self.hard_mode else "Mode: Normal"
+        mode_color = (235, 87, 87) if self.hard_mode else (87, 200, 235)
+        mode_surf = panel_font.render(mode_text, True, mode_color)
+        surface.blit(mode_surf, (515, 20))
+
+        # 歷史單字標題與列表
+        hist_title = small_font.render("History Guesses:", True, COLOR_TEXT)
+        surface.blit(hist_title, (515, 60))
+        for idx, word in enumerate(self.history_words):
+            w_surf = small_font.render(f"{idx+1}. {word}", True, COLOR_TEXT)
+            surface.blit(w_surf, (525, 90 + idx * 25))
+
+        # 任務三：勝率統計標籤
+        stat_y = 300
+        pygame.draw.line(surface, COLOR_LINE, (510, stat_y), (690, stat_y), 1)
+        
+        stat_title = panel_font.render("Statistics", True, COLOR_TEXT)
+        surface.blit(stat_title, (515, stat_y + 10))
+        
+        tot_str = f"Total Games: {self.stats['total_games']}"
+        win_str = f"Wins: {self.stats['wins']}"
+        rate_str = f"Win Rate: {self.stats['win_rate']}%"
+        
+        surface.blit(small_font.render(tot_str, True, COLOR_TEXT), (515, stat_y + 45))
+        surface.blit(small_font.render(win_str, True, COLOR_TEXT), (515, stat_y + 70))
+        surface.blit(small_font.render(rate_str, True, COLOR_TEXT), (515, stat_y + 95))
+
+        # 任務三底端簡潔統計單行顯示
+        summary_str = f"Total: {self.stats['total_games']} | Wins: {self.stats['wins']} | Win Rate: {self.stats['win_rate']}%"
+        sum_surf = small_font.render(summary_str, True, (180, 180, 180))
+        surface.blit(sum_surf, (505, HEIGHT - 70))
+
+        # 3. 畫底部提示訊息
         msg_surface = small_font.render(self.message, True, COLOR_TEXT)
-        msg_rect = msg_surface.get_rect(center=(WIDTH // 2, HEIGHT - 40))
+        msg_rect = msg_surface.get_rect(center=(250, HEIGHT - 40))
         surface.blit(msg_surface, msg_rect)
 
 
